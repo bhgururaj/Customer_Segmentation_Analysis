@@ -1,0 +1,353 @@
+---
+title: "Customer Segmentation"
+author: "Apoorv Mehrotra"
+date: "8/23/2019"
+output: github_document
+---
+
+```{r package_calls, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(lattice)
+library(grid)
+library(gridExtra)
+library(mosaic)
+library(quantmod)
+library(foreach)
+set.seed(1)
+```
+
+# The goal {#the-goal}
+
+"NutrientH20" (pseudonym) wants to understand its social-media audience a little bit better, so that it could hone its messaging a little more sharply.
+
+## Assumptions
+
+For the sake of this analysis (based on the pseudonym) we will **consider NutrientH20 as a nutrient water brand which is entering the market of flavoured electrolytes**.
+
+# Approach
+
+1. Identify scope+context of problem (goal+assumptions)
+2. Data normalisation
+3. Hypotheses creation
+4. Hypotheses testing
+    a. KNN Clustering
+    b. PCA
+    c. Cluster Identification
+5. Recommendation
+
+# Data pre-processing {#data_processing}
+
+We have a dataset that includes 36 tweet categories for 7882 users, where each cell represents how many times each user has posted a tweet that can be tagged to that category. Categories include the following:
+
+```{r data_read1, echo=FALSE}
+
+df  <- read.csv('social_marketing.csv', row.names=1)
+#head(df)
+#nrow(df)
+#ncol(df)
+kable(sort(colnames(df)))
+```
+
+## Data normalisation
+
+As with any problem where the columns are similar items with values as frequency of occurence (typical text analytics base data), we calculate the term frequencies as % of tweets tagged to a category per user. This normalises for the difference in number of tweets per user, giving us an intuition of weightage of a category in the tweet profile for the user.
+
+```{r tf, include=FALSE}
+df_freq = df/rowSums(df)
+head(df_freq,5)
+```
+```{r, echo=FALSE}
+hist(rowSums(df), main="Histogram - number of tweets by user", xlab = "Number of tweets")
+```
+
+## Outlier removal
+
+We look at the 4 unwanted categoies - **chatter**, **uncategorized**, **adult** and **spam** and see the % of data filtered when we set a range of cutoffs on the term frequency of that particular category for every user.
+
+1. Chatter
+
+```{r chatter_out, echo=FALSE}
+chatter_outlier = c()
+
+for(i in seq(0.15,0.4,0.05)){
+
+    chatter_outlier = rbind(chatter_outlier,nrow(df_freq%>%filter(chatter>i))*100/nrow(df_freq))
+    }
+
+df_chatter_outlier = data.frame(cbind(seq(15,40,5),chatter_outlier))
+colnames(df_chatter_outlier) <- c("TF_Chatter", "% Data")
+kable(df_chatter_outlier)
+```
+
+
+2. Adult
+
+```{r adult_out, echo=FALSE}
+adult_outlier = c()
+
+for(i in seq(0.1,0.5,0.05)){
+
+    adult_outlier = rbind(adult_outlier,nrow(df_freq%>%filter(adult>i))*100/nrow(df_freq))
+    }
+
+df_adult_outlier = data.frame(cbind(seq(10,50,5),adult_outlier))
+colnames(df_adult_outlier)  <- c("TF_Adult", "% Data")
+kable(df_adult_outlier)
+```
+
+
+3. Spam
+
+```{r spam_out, echo=FALSE}
+spam_outlier = c()
+
+for(i in seq(0.01,0.15,0.05)){
+
+    spam_outlier = rbind(spam_outlier,nrow(df_freq%>%filter(spam>i))*100/nrow(df_freq))
+    }
+
+df_spam_outlier = data.frame(cbind(seq(1,15,5),spam_outlier))
+colnames(df_spam_outlier)  <- c("TF_Spam", "% Data")
+kable(df_spam_outlier)
+```
+
+
+4. Uncategorized
+
+```{r uncta_out, echo=FALSE}
+uncategorized_outlier = c()
+
+for(i in seq(0.1,0.4,0.03)){
+
+    uncategorized_outlier = rbind(uncategorized_outlier,nrow(df_freq%>%filter(uncategorized>i))*100/nrow(df_freq))
+    }
+
+df_uncategorized_outlier = data.frame(cbind(seq(10,40,3),uncategorized_outlier))
+colnames(df_uncategorized_outlier)  <- c("TF_Uncat", "% Data")
+kable(df_uncategorized_outlier)
+```
+
+
+We identified the following cutoffs dfor outliers our base data:
+
+1. chatter>0.25 (9%)
+2. adult>0.20 (1.5%)
+3. spam>0.01 (0.6%)
+4. uncategorized>0.16 (0.57%)
+
+We also checked for mutual exclusivity of these rows (max data loss if all are Mutually Exclusive) and for that if we remove rows with these features, we lose about 12-13% of the data, which seems like a practical enough trade off for removing a lot of noise from the, mainly due to these 4 columns
+
+### Why these columns?
+
+1. Chatter and uncategorized tweets will anyway not help in clustering, their correlation with any field is being assumed as a coincidence
+2. Spam and adult are categories that we do not want in our clusters
+
+```{r package_load, include=FALSE}
+library(LICORS)  # for kmeans++
+library(foreach)
+library(mosaic)
+```
+
+
+```{r Removing rows, include=FALSE}
+
+df_clean <- df_freq
+df_clean <- df_clean%>%filter(chatter<0.25)%>%filter(adult<0.20)%>%filter(spam<0.01)%>%filter(uncategorized<0.16)
+nrow(df_clean)/nrow(df_freq)
+```
+
+# Customer Segments - Intuition (Hypothesis) {#hypothesis_creation}
+
+## Correlated categories
+
+When we looked at the set of categories, we expected some categories to have a strong correlation - eg. personal_fitness & health_nuitrition seem intuitively correlated. To set a cutoff, we looked at the number of pairs that made the different cutoffs for correlation.
+
+```{r high_corr, echo=FALSE}
+high_cor = c()
+cor_df = data.frame(as.table(cor(df)))
+for(i in seq(0.5,0.9,0.05)){
+
+    
+    high_cor = rbind(high_cor,nrow(cor_df%>%filter(Freq>i)%>%filter(Var1!=Var2)))
+    }
+
+df_high_cor = data.frame(cbind(seq(0.5,0.9,0.05),high_cor/2))
+colnames(df_high_cor)  <- c("Correlation Cutoff","Pair Counts")
+kable(df_high_cor)
+```
+
+```{r, echo=FALSE}
+kable(cor_df%>%filter(Freq>0.6)%>%filter(Var1!=Var2)%>%arrange(desc(Freq))%>%distinct(Freq, .keep_all=TRUE))
+```
+
+Shown above are the number of unique pairs of categories that made the cut above a certain correlation value. 11 seems to be a reasonable number to compare - let's take a look at the categories with correlation>0.60, which we can expect to see together as the features of the clusters we are going to create.
+
+By looking at these pairs, we feel that we should look for 5 broad clusters of customers:
+
+## 1. The fit ones
+
+**personal_fitness**, **health_nutrition** come with the highest correlation of 0.8, followed by the pair of **health_nutrition** and **outdoors** with a correlation of 0.6. We expect our first category to be populated by people who are fitness-oriented and focus on keeping a healthy lifestyle.. We are not sure about any age-based demographics for this cluster as of now.
+
+## 2. Gen X
+
+**parenting**, **religion** and **sports_fandom** - all 3 categories have correlation of ~0.60 between them (all 3 unique pairs) which hint at a uniform association among all three. We are assuming Gen X (people aged 39-54) to fall in this category.
+
+## 3. The Instagrammers
+
+**Beauty**, **Cooking** and **fashion** - all 3 categories are correlated reasonable well with each other with values ranging from 0.63-0.72, hinting at an association among the 3. While these people might not be focused on a healthy lifestyle in terms of exercise and eating right, they are focused on how they look, what they eat - which in this day and age of social media hints at the one stop shop for sharing the perfect reel life.
+
+## 4. The centennial gamer
+
+We see one particular pair (**college_uni** and **online_gaming**) with a high correlation of 0.77, which hits at the age group between later teens and early 20s.
+
+## 5. Politics and Travel?
+
+We don't know what to call this category yet - the intersection of politics and travel is unique yet not uncommon. Politically aware people who like to travel, social workers, stand-up comedians, legal consultants, management consultants - there are many people who are likely to tweet about both of these categories. Let's hope our clustering exercise helps us understand these people better.
+
+# Hypothesis testing {#hyp_testing}
+
+## Clustering using KNN {#KNN}
+
+We perform z-scoring on our TF dataset and create a grid for number of clusters in KNN to see where the elbow comes in our curve (to decide k for KNN)
+
+```{r KNN, include=FALSE}
+sc_mkt = scale(df_clean, center=TRUE, scale=TRUE) # cluster on measurables
+k_grid = seq(2, 20, by=1)
+SSE_grid = foreach(k = k_grid, .combine='c') %do% {
+  cluster_k = kmeans(sc_mkt, k, nstart=50)
+  cluster_k$tot.withinss
+}
+```
+```{r plot, echo=FALSE}
+plot(k_grid, SSE_grid, xlab = "K")
+```
+
+Clearly, there is no clear edge - we will go ahead with our range of k in [3,6] for clustering based on our hypothesis. Clustering will help us put our individual customers in separate groups based on similarities in their tweeting patterns.
+
+```{r KNN_3_6, include=FALSE}
+clust3 = kmeans(sc_mkt, 3, nstart=50)
+clust4 = kmeans(sc_mkt, 4, nstart=50)
+clust5 = kmeans(sc_mkt, 5, nstart=50)
+clust6 = kmeans(sc_mkt, 6, nstart=50)
+```
+
+## Principal Component Analysis {#PCA}
+
+Principal Component Analysis (PCA) will help us understand the composition of each point as an aggregation of the different numbers and types of tweets made by each point. We will consider only the first two pricipal components.
+
+```{r PCA2, include=FALSE}
+
+pc2 = prcomp(df_clean, scale=TRUE, rank=2)
+loadings = pc2$rotation
+scores = pc2$x
+```
+
+## PCA and KNN
+
+We will now compare the results of KNN and PCA. Steps:
+
+1. Plot each point on the PCA plot - the plot will tell us where each point lies based on it's composition of different number and types of tweets.
+2. Color of each point will be displayed based on cluster assigned to that point in KNN
+3. This will help us understand if customers from a particular cluster tend to tweet more about any specific topic(s).
+
+Different plots from KNN look like:
+
+```{r plotting, echo=FALSE}
+layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+qplot(scores[,1], scores[,2], color=clust3$cluster, xlab='Component 1', ylab='Component 2', main="3 Clusters")
+qplot(scores[,1], scores[,2], color=clust4$cluster, xlab='Component 1', ylab='Component 2', main="4 Clusters")
+qplot(scores[,1], scores[,2], color=clust5$cluster, xlab='Component 1', ylab='Component 2', main="5 Clusters")
+qplot(scores[,1], scores[,2], color=clust6$cluster, xlab='Component 1', ylab='Component 2', main="6 Clusters")
+```
+
+```{r, PCA, include=FALSE}
+# Question 2: how are the individual PCs loaded on the original variables?
+# The top words associated with each edge of component-1
+o1 = order(loadings[,1], decreasing=TRUE)
+colnames(df_clean)[head(o1,5)]
+colnames(df_clean)[tail(o1,5)]
+
+# Question 2: how are the individual PCs loaded on the original variables?
+# The top words associated with each edge of component-2
+o2 = order(loadings[,2], decreasing=TRUE)
+colnames(df_clean)[head(o2,5)]
+colnames(df_clean)[tail(o2,5)]
+
+```
+
+Looking at how PC1 and PC2 are formed in terms of categories:
+
+```{r PCA_Pts, echo=FALSE}
+{plot(loadings, col="lightblue", pch=19, cex=2, xlim = c(-0.3,0.5), ylim = c(-0.45,0.3))
+text(loadings, labels=rownames(loadings), cex=0.4, font=1, pos=1)}
+```
+
+We can see 5 clusters - let's look at our data points coloured in 5 clusters again:
+
+```{r k=5, echo=FALSE}
+qplot(scores[,1], scores[,2], color=clust5$cluster, xlab='Component 1', ylab='Component 2', main="5 Clusters")
+```
+
+
+## Cluster Identification {#cluster_id}
+
+
+Comparing plots for both categories along PC1 and PC2, we can identify the 5 segments
+
+#### 1. The fit ones
+
+**personal_fitness**, **health_nutrition**  and **outdoors** appear close by between PC1=[-0.2,-0.1] and PC2=[-0.45,-0.3]
+
+#### 2. The Instagrammer
+
+Going slightly wider on PC1 and a little up on PC2, we reach **Beauty**, **Cooking** and **fashion** - all 3 categories lying between the younger age reflecting categories like **college_uni**, **online_gaming**, **photo_sharing** and fitness focused **personal_fitness**, **health_nutrition**, **outdoors**. We can consider these people active on social media and aware of their looks and food.
+
+#### 3. The net-savvy student
+
+Further up PC2 on similar PC1 range as the 2 clusters above, **college_uni** and **online_gaming** interact with other categories that net-savvy high school and college students are likely to tweet about like **shopping**, **tv_film**, **sports_playing** etc.
+
+#### 4. The aware traveller
+
+After observing **politics** and **travel** land near **news**, we can take 1 step closer to identifying this cliuster as aware travellers who keep up with current events, tv, film and computers. These are likely to be working professionals that have travelling jobs.
+
+#### 5. The homely parents (Gen X)
+
+**parenting**, **religion** and **sports_fandom** - all 3 categories appear on the far right along PC1, right after **food**, **school** and **family**. Reflects traits and interests of traditional American parents - sports, religion, food, family, school and the most obvious, parenting.
+
+# Recommendations {#recommendations}
+
+#### 1. The fit ones
+
+Appeal to the importance of electrlytes in a balanced diet and how they help achieve fitness goals.
+
+#### 2. The Instagrammer
+
+These people can be approached for collabs as marketing opportunities where both parties end-up in a win-win situation.
+
+#### 3. The net-savvy student
+
+Appeal to this being as an easy, all-in-one solution to carry around campus to stay hydrated and enjoy flavoured, non-fattening drinks at the same time.
+
+#### 4. The aware traveller
+
+Travelling takes a toll on the body - place this item at popular ports of travel and advertise the advantages of staying hyrated while travelling. These can include better sleep, prevention of ear-blockage during take-offs and landings or change in altitude in general.
+
+#### 5. The homely parents (Gen X)
+
+Display the product in the light of a healthy alternative to sodas for their children - delivering great taste AND replacement. This is the new party drink!
+
+
+
+# Appendix
+
+## Data collection and preparation
+
+The data in [social_marketing.csv](social_marketing.csv) was collected in the course of a market-research study using followers of the Twitter account of a large consumer brand that shall remain nameless---let's call it "NutrientH20" just to have a label.  
+
+A bit of background on the data collection: the advertising firm who runs NutrientH20's online-advertising campaigns took a sample of the brand's Twitter followers.  They collected every Twitter post ("tweet") by each of those followers over a seven-day period in June 2014.  Every post was examined by a human annotator contracted through [Amazon's Mechanical Turk](https://www.mturk.com/mturk/welcome) service.  Each tweet was categorized based on its content using a pre-specified scheme of 36 different categories, each representing a broad area of interest (e.g. politics, sports, family, etc.)  Annotators were allowed to classify a post as belonging to more than one category.  For example, a hypothetical post such as "I'm really excited to see grandpa go wreck shop in his geriatic soccer league this Sunday!" might be categorized as both "family" and "sports."  You get the picture.
+
+Each row of [social_marketing.csv](social_marketing.csv) represents one user, labeled by a random (anonymous, unique) 9-digit alphanumeric code.  Each column represents an interest, which are labeled along the top of the data file.  The entries are the number of posts by a given user that fell into the given category.  Two interests of note here are "spam" (i.e. unsolicited advertising) and "adult" (posts that are pornographic, salacious, or explicitly sexual).  There are a lot of spam and pornography ["bots" on Twitter](http://mashable.com/2013/11/08/twitter-spambots/); while these have been filtered out of the data set to some extent, there will certainly be some that slip through.  There's also an "uncategorized" label.  Annotators were told to use this sparingly, but it's there to capture posts that don't fit at all into any of the listed interest categories.  (A lot of annotators may used the "chatter" category for this as well.)  Keep in mind as you examine the data that you cannot expect perfect annotations of all posts.  Some annotators might have simply been asleep at the wheel some, or even all, of the time!  Thus there is some inevitable error and noisiness in the annotation process.
