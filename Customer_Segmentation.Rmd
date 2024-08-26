@@ -1,9 +1,4 @@
----
-title: "Customer Segmentation"
-author: "Apoorv Mehrotra"
-date: "8/23/2019"
-output: github_document
----
+Customer Segmentation Analysis.
 
 ```{r package_calls, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
